@@ -1,23 +1,31 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"net/http"
 	"os"
 
-	"github.com/go-kit/kit/log"
-
-	httptransport "github.com/go-kit/kit/transport/http"
 	stdprometheus "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/go-kit/kit/log"
 	kitprometheus "github.com/go-kit/kit/metrics/prometheus"
-	"github.com/go-kit/kit/metrics"
+	httptransport "github.com/go-kit/kit/transport/http"
 )
 
-// Transports expose the service to the network. In this first example we utilize JSON over HTTP.
 func main() {
-	logger := log.NewLogfmtLogger(os.Stderr)
+	var (
+		listen = flag.String("listen", ":8080", "HTTP listen address")
+		proxy  = flag.String("proxy", "", "Optional comma-separated list of URLs to proxy uppercase requests")
+	)
+	flag.Parse()
+
+	var logger log.Logger
+	logger = log.NewLogfmtLogger(os.Stderr)
+	logger = log.With(logger, "listen", *listen, "caller", log.DefaultCaller)
 
 	fieldKeys := []string{"method", "error"}
-
 	requestCount := kitprometheus.NewCounterFrom(stdprometheus.CounterOpts{
 		Namespace: "my_group",
 		Subsystem: "string_service",
@@ -35,19 +43,19 @@ func main() {
 		Subsystem: "string_service",
 		Name:      "count_result",
 		Help:      "The result of each count method.",
-	}, []string{}) // no fields here
+	}, []string{})
 
 	var svc StringService
 	svc = stringService{}
-	svc = loggingMiddleware{logger, svc}
-	svc = instrumentingMiddleware{requestCount, requestLatency, countResult, svc}
+	svc = proxyingMiddleware(context.Background(), *proxy, logger)(svc)
+	svc = loggingMiddleware(logger)(svc)
+	svc = instrumentingMiddleware(requestCount, requestLatency, countResult)(svc)
 
 	uppercaseHandler := httptransport.NewServer(
 		makeUppercaseEndpoint(svc),
 		decodeUppercaseRequest,
 		encodeResponse,
 	)
-
 	countHandler := httptransport.NewServer(
 		makeCountEndpoint(svc),
 		decodeCountRequest,
@@ -57,6 +65,6 @@ func main() {
 	http.Handle("/uppercase", uppercaseHandler)
 	http.Handle("/count", countHandler)
 	http.Handle("/metrics", promhttp.Handler())
-	logger.Log("msg", "HTTP", "addr", ":8080")
-	logger.Log("err", http.ListenAndServe(":8080", nil))
+	logger.Log("msg", "HTTP", "addr", *listen)
+	logger.Log("err", http.ListenAndServe(*listen, nil))
 }
